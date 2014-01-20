@@ -29,10 +29,10 @@ function Game(opts) {
   if (!(this instanceof Game)) return new Game(opts)
   var self = this
   if (!opts) opts = {}
-  if (process.browser && this.notCapable(opts)) return
-  
-  // is this a client or a headless server
-  this.isClient = Boolean( (typeof opts.isClient !== 'undefined') ? opts.isClient : process.browser )
+  // determine if this is a client or a headless server
+  this.isClient = opts.isClient = Boolean( (typeof opts.isClient !== 'undefined') ? opts.isClient : process.browser )
+  // check if capable
+  if (this.notCapable(opts)) return
 
   if (!('generateChunks' in opts)) opts.generateChunks = true
   this.generateChunks = opts.generateChunks
@@ -60,9 +60,6 @@ function Game(opts) {
   this.items = []
   this.voxels = voxel(this)
   this.scene = new THREE.Scene()
-  this.view = opts.view || new voxelView(THREE, { width: this.width, height: this.height, skyColor: this.skyColor })
-  this.view.bindToScene(this.scene)
-  this.camera = this.view.getCamera()
   if (!opts.lightsDisabled) this.addLights(this.scene)
   
   this.fogScale = opts.fogScale || 32
@@ -89,6 +86,33 @@ function Game(opts) {
   // contains new chunks yet to be generated. Handled by game.loadPendingChunks
   this.pendingChunks = []
 
+  this.materialNames = opts.materials || [['grass', 'dirt', 'grass_dirt'], 'brick', 'dirt']
+  
+  self.chunkRegion.on('change', function(newChunk) {
+    self.removeFarChunks()
+  })
+
+  if (this.generateChunks) this.handleChunkGeneration()
+
+  // headless server specific logic
+  if (!this.isClient) {
+
+    // server shim for voxel-texture
+    this.materials = {
+      find: function(name) {
+        return this.materialNames.indexOf(name)+1
+      },
+      tick: function(){},
+    }
+
+  }
+
+  //
+  // --- client side only after this point ---
+  //
+  if (!this.isClient) return
+
+  // load material textures
   this.materials = texture({
     game: this,
     texturePath: opts.texturePath || './textures/',
@@ -96,19 +120,26 @@ function Game(opts) {
     materialParams: opts.materialParams || {},
     materialFlatColor: opts.materialFlatColor === true
   })
+  this.materials.load(this.materialNames)
 
-  this.materialNames = opts.materials || [['grass', 'dirt', 'grass_dirt'], 'brick', 'dirt']
-  
-  self.chunkRegion.on('change', function(newChunk) {
-    self.removeFarChunks()
-  })
+  // create voxel-view
+  this.view = opts.view || new voxelView(THREE, { width: this.width, height: this.height, skyColor: this.skyColor })
+  this.view.bindToScene(this.scene)
+  this.appendTo = function (element) {
+    this.view.appendTo(element)
+  }
+  this.render = function(delta) {
+    this.view.render(this.scene)
+  }
 
-  if (this.isClient) this.materials.load(this.materialNames)
-
-  if (this.generateChunks) this.handleChunkGeneration()
-
-  // client side only after this point
-  if (!this.isClient) return
+  // setup camera
+  this.camera = this.view.getCamera()
+  this.cameraPosition = function() {
+    return this.view.cameraPosition()
+  }
+  this.cameraVector = function() {
+    return this.view.cameraVector()
+  }
   
   this.paused = true
   this.initializeRendering(opts)
@@ -134,14 +165,6 @@ Game.prototype.voxelPosition = function(gamePosition) {
   v[1] = _(p[1])
   v[2] = _(p[2])
   return v
-}
-
-Game.prototype.cameraPosition = function() {
-  return this.view.cameraPosition()
-}
-
-Game.prototype.cameraVector = function() {
-  return this.view.cameraVector()
 }
 
 Game.prototype.makePhysical = function(target, envelope, blocksCreation) {
@@ -273,10 +296,6 @@ Game.prototype.createAdjacent = function(hit, val) {
   this.createBlock(hit.adjacent, val)
 }
 
-Game.prototype.appendTo = function (element) {
-  this.view.appendTo(element)
-}
-
 // # Defaults/options parsing
 
 Game.prototype.gravity = [0, -0.0000036, 0]
@@ -329,16 +348,18 @@ Game.prototype.setDimensions = function(opts) {
 }
 
 Game.prototype.notCapable = function(opts) {
-  var self = this
-  if( !Detector().webgl ) {
+  var _this = this
+  var notCapable = false
+  // if this is a client, require webgl
+  if( _this.isClient && !Detector().webgl ) {
     this.view = {
       appendTo: function(el) {
-        el.appendChild(self.notCapableMessage())
+        el.appendChild(_this.notCapableMessage())
       }
     }
-    return true
+    notCapable = true
   }
-  return false
+  return notCapable
 }
 
 Game.prototype.notCapableMessage = function() {
@@ -353,6 +374,7 @@ Game.prototype.notCapableMessage = function() {
 }
 
 Game.prototype.onWindowResize = function() {
+  if (!this.isClient) return
   var width = window.innerWidth
   var height = window.innerHeight
   if (this.container) {
@@ -427,7 +449,7 @@ Game.prototype.addLights = function(scene) {
   var ambientLight, directionalLight
   ambientLight = new THREE.AmbientLight(0xcccccc)
   scene.add(ambientLight)
-  var light	= new THREE.DirectionalLight( 0xffffff , 1)
+  var light = new THREE.DirectionalLight( 0xffffff , 1)
   light.position.set( 1, 1, 0.5 ).normalize()
   scene.add( light )
 }
@@ -638,10 +660,6 @@ Game.prototype.tick = function(delta) {
   this.spatial.emit('position', playerPos, playerPos)
 }
 
-Game.prototype.render = function(delta) {
-  this.view.render(this.scene)
-}
-
 Game.prototype.initializeTimer = function(rate) {
   var self = this
   var accum = 0
@@ -696,6 +714,7 @@ Game.prototype.initializeRendering = function(opts) {
 }
 
 Game.prototype.initializeControls = function(opts) {
+  if (!this.isClient) return
   // player control
   this.keybindings = opts.keybindings || this.defaultButtons
   this.buttons = kb(document.body, this.keybindings)
